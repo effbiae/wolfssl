@@ -349,22 +349,18 @@ WOLFSSL_ABI WOLFSSL_API const char* wc_GetErrorString(int error);
         #endif
     #endif
     #ifndef WC_ERR_TRACE
-        #ifdef NO_STDIO_FILESYSTEM
-        #define WC_ERR_TRACE(label)                           \
-            ( printf("ERR TRACE: %s L %d %s (%d)\n",          \
-                      __FILE__, __LINE__, #label, label),     \
-              WOLFSSL_DEBUG_BACKTRACE_RENDER_CLAUSE,          \
-              label                                           \
-            )
+        #ifdef WOLFSSL_DEBUG_PRINTF
+        #define LOCAL_PRINTF WOLFSSL_DEBUG_PRINTF
         #else
-        #define WC_ERR_TRACE(label)                           \
-            ( fprintf(stderr,                                 \
-                      "ERR TRACE: %s L %d %s (%d)\n",         \
-                      __FILE__, __LINE__, #label, label),     \
-              WOLFSSL_DEBUG_BACKTRACE_RENDER_CLAUSE,          \
-              label                                           \
-            )
+        #define LOCAL_PRINTF printf
         #endif
+        #define WC_ERR_TRACE(label)                                \
+            ( LOCAL_PRINTF("ERR TRACE: %s L %d %s (%d)\n",         \
+                      __FILE__, __LINE__, #label, label),          \
+              WOLFSSL_DEBUG_BACKTRACE_RENDER_CLAUSE,               \
+              label                                                \
+            )
+        #undef LOCAL_PRINTF
     #endif
     #include <wolfssl/debug-trace-error-codes.h>
 #else
