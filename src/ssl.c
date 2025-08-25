@@ -3388,7 +3388,9 @@ int wolfSSL_read_ex(WOLFSSL* ssl, void* data, size_t sz, size_t* rd)
         *rd = (size_t)ret;
     }
 
+    /* SSL_read_ex() ... will return 1 for success or 0 for failure */
     if (ret <= 0) ret = 0;
+    if (ret > 0) ret = 1;
     return ret;
 }
 
