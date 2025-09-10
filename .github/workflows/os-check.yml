@@ -3,7 +3,7 @@ name: Ubuntu-Macos-Windows Tests
 # START OF COMMON SECTION
 on:
   push:
-    branches: [ 'master', 'main', 'release/**' ]
+    branches: [ '*' ]
   pull_request:
     branches: [ '*' ]
 
@@ -78,13 +78,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-22.04, macos-latest ]
+        os: [ macos-latest ]
         user-settings: [
           # Add new user_settings.h here
           'examples/configs/user_settings_all.h',
         ]
     name: make user_setting.h
-    if: github.repository_owner == 'wolfssl'
     runs-on: ${{ matrix.os }}
     # This should be a safe limit for the tests to run.
     timeout-minutes: 14
