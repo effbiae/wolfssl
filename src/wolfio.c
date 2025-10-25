@@ -2578,6 +2578,29 @@ void wolfSSL_SetIO_NetX(WOLFSSL* ssl, NX_TCP_SOCKET* nxSocket, ULONG waitOption)
  * callback implemented.
  */
 
+static int MicriumTranslateError(WOLFSSL* ssl, NET_ERR err)
+{
+    if (err == NET_ERR_RX || err == NET_SOCK_ERR_RX_Q_EMPTY ||
+        err == NET_ERR_FAULT_LOCK_ACQUIRE) {
+        if (!wolfSSL_dtls(ssl) || wolfSSL_dtls_get_using_nonblock(ssl)) {
+            WOLFSSL_MSG("\tWould block");
+            return WOLFSSL_CBIO_ERR_WANT_READ;
+        }
+        else {
+            WOLFSSL_MSG("\tSocket timeout");
+            return WOLFSSL_CBIO_ERR_TIMEOUT;
+        }
+    } else if (err == NET_SOCK_ERR_CLOSED) {
+        WOLFSSL_MSG("Embed receive connection closed");
+        return WOLFSSL_CBIO_ERR_CONN_CLOSE;
+    } else if (err == NET_ERR_TX) {
+        WOLFSSL_MSG("\tWould block");
+        return WOLFSSL_CBIO_ERR_WANT_WRITE;
+    }
+    WOLFSSL_MSG("\tGeneral error");
+    return WOLFSSL_CBIO_ERR_GENERAL;
+}
+
 /* The Micrium uTCP/IP send callback
  * return : bytes sent, or error
  */
@@ -2588,21 +2611,45 @@ int MicriumSend(WOLFSSL* ssl, char* buf, int sz, void* ctx)
     NET_ERR err;
 
     ret = NetSock_TxData(sd, buf, sz, ssl->wflags, &err);
-    if (ret < 0) {
+    if (err < 0) {
         WOLFSSL_MSG("Embed Send error");
-
-        if (err == NET_ERR_TX) {
-            WOLFSSL_MSG("\tWould block");
-            return WOLFSSL_CBIO_ERR_WANT_WRITE;
-
-        } else {
-            WOLFSSL_MSG("\tGeneral error");
-            return WOLFSSL_CBIO_ERR_GENERAL;
-        }
+        return MicriumTranslateError(ssl, err);
     }
-
     return ret;
 }
+
+#ifdef WOLFSSL_DTLS
+static void RxSetDTLSTimeout(WOLFSSL* ssl, NET_SOCK_ID sd)
+{
+    int dtls_timeout = wolfSSL_dtls_get_current_timeout(ssl);
+    /* Don't use ssl->options.handShakeDone since it is true even if
+     * we are in the process of renegotiation */
+    byte doDtlsTimeout = ssl->options.handShakeState != HANDSHAKE_DONE;
+    #ifdef WOLFSSL_DTLS13
+    if (ssl->options.dtls && IsAtLeastTLSv1_3(ssl->version)) {
+        doDtlsTimeout =
+            doDtlsTimeout || ssl->dtls13Rtx.rtxRecords != NULL ||
+            (ssl->dtls13FastTimeout && ssl->dtls13Rtx.seenRecords != NULL);
+    }
+    #endif /* WOLFSSL_DTLS13 */
+    if (!doDtlsTimeout)
+        dtls_timeout = 0;
+    if (!wolfSSL_dtls_get_using_nonblock(ssl)) {
+        /* needs timeout in milliseconds */
+        #ifdef WOLFSSL_DTLS13
+        if (wolfSSL_dtls13_use_quick_timeout(ssl) &&
+            IsAtLeastTLSv1_3(ssl->version)) {
+            dtls_timeout = (1000 * dtls_timeout) / 4;
+        } else
+        #endif /* WOLFSSL_DTLS13 */
+            dtls_timeout = 1000 * dtls_timeout;
+        NetSock_CfgTimeoutRxQ_Set(sd, dtls_timeout, &err);
+        if (err != NET_SOCK_ERR_NONE) {
+            WOLFSSL_MSG("NetSock_CfgTimeoutRxQ_Set failed");
+        }
+    }
+}
+#endif
 
 /* The Micrium uTCP/IP receive callback
  *  return : nb bytes read, or error
@@ -2613,65 +2660,16 @@ int MicriumReceive(WOLFSSL *ssl, char *buf, int sz, void *ctx)
     NET_SOCK_RTN_CODE ret;
     NET_ERR err;
 
+    WOLFSSL_ENTER("MicriumReceive");
     #ifdef WOLFSSL_DTLS
-    {
-        int dtls_timeout = wolfSSL_dtls_get_current_timeout(ssl);
-        /* Don't use ssl->options.handShakeDone since it is true even if
-         * we are in the process of renegotiation */
-        byte doDtlsTimeout = ssl->options.handShakeState != HANDSHAKE_DONE;
-        #ifdef WOLFSSL_DTLS13
-        if (ssl->options.dtls && IsAtLeastTLSv1_3(ssl->version)) {
-            doDtlsTimeout =
-                doDtlsTimeout || ssl->dtls13Rtx.rtxRecords != NULL ||
-                (ssl->dtls13FastTimeout && ssl->dtls13Rtx.seenRecords != NULL);
-        }
-        #endif /* WOLFSSL_DTLS13 */
-
-        if (!doDtlsTimeout)
-            dtls_timeout = 0;
-
-        if (!wolfSSL_dtls_get_using_nonblock(ssl)) {
-            /* needs timeout in milliseconds */
-            #ifdef WOLFSSL_DTLS13
-            if (wolfSSL_dtls13_use_quick_timeout(ssl) &&
-                IsAtLeastTLSv1_3(ssl->version)) {
-                dtls_timeout = (1000 * dtls_timeout) / 4;
-            } else
-            #endif /* WOLFSSL_DTLS13 */
-                dtls_timeout = 1000 * dtls_timeout;
-            NetSock_CfgTimeoutRxQ_Set(sd, dtls_timeout, &err);
-            if (err != NET_SOCK_ERR_NONE) {
-                WOLFSSL_MSG("NetSock_CfgTimeoutRxQ_Set failed");
-            }
-        }
-    }
+    RxSetDTLSTimeout(ssl, sd);
     #endif /* WOLFSSL_DTLS */
 
     ret = NetSock_RxData(sd, buf, sz, ssl->rflags, &err);
     if (ret < 0) {
         WOLFSSL_MSG("Embed Receive error");
-
-        if (err == NET_ERR_RX || err == NET_SOCK_ERR_RX_Q_EMPTY ||
-            err == NET_ERR_FAULT_LOCK_ACQUIRE) {
-            if (!wolfSSL_dtls(ssl) || wolfSSL_dtls_get_using_nonblock(ssl)) {
-                WOLFSSL_MSG("\tWould block");
-                return WOLFSSL_CBIO_ERR_WANT_READ;
-            }
-            else {
-                WOLFSSL_MSG("\tSocket timeout");
-                return WOLFSSL_CBIO_ERR_TIMEOUT;
-            }
-
-        } else if (err == NET_SOCK_ERR_CLOSED) {
-            WOLFSSL_MSG("Embed receive connection closed");
-            return WOLFSSL_CBIO_ERR_CONN_CLOSE;
-
-        } else {
-            WOLFSSL_MSG("\tGeneral error");
-            return WOLFSSL_CBIO_ERR_GENERAL;
-        }
+        return MicriumTranslateError(ssl, err);
     }
-
     return ret;
 }
 
@@ -2688,61 +2686,15 @@ int MicriumReceiveFrom(WOLFSSL *ssl, char *buf, int sz, void *ctx)
     NET_ERR err;
 
     WOLFSSL_ENTER("MicriumReceiveFrom");
-
-#ifdef WOLFSSL_DTLS
-    {
-        int dtls_timeout = wolfSSL_dtls_get_current_timeout(ssl);
-        /* Don't use ssl->options.handShakeDone since it is true even if
-         * we are in the process of renegotiation */
-        byte doDtlsTimeout = ssl->options.handShakeState != HANDSHAKE_DONE;
-
-        #ifdef WOLFSSL_DTLS13
-        if (ssl->options.dtls && IsAtLeastTLSv1_3(ssl->version)) {
-            doDtlsTimeout =
-                doDtlsTimeout || ssl->dtls13Rtx.rtxRecords != NULL ||
-                (ssl->dtls13FastTimeout && ssl->dtls13Rtx.seenRecords != NULL);
-        }
-        #endif /* WOLFSSL_DTLS13 */
-
-        if (!doDtlsTimeout)
-            dtls_timeout = 0;
-
-        if (!wolfSSL_dtls_get_using_nonblock(ssl)) {
-            /* needs timeout in milliseconds */
-            #ifdef WOLFSSL_DTLS13
-            if (wolfSSL_dtls13_use_quick_timeout(ssl) &&
-                IsAtLeastTLSv1_3(ssl->version)) {
-                dtls_timeout = (1000 * dtls_timeout) / 4;
-            } else
-            #endif /* WOLFSSL_DTLS13 */
-                dtls_timeout = 1000 * dtls_timeout;
-            NetSock_CfgTimeoutRxQ_Set(sd, dtls_timeout, &err);
-            if (err != NET_SOCK_ERR_NONE) {
-                WOLFSSL_MSG("NetSock_CfgTimeoutRxQ_Set failed");
-            }
-        }
-    }
-#endif /* WOLFSSL_DTLS */
+    #ifdef WOLFSSL_DTLS
+    RxSetDTLSTimeout(ssl, sd);
+    #endif /* WOLFSSL_DTLS */
 
     ret = NetSock_RxDataFrom(sd, buf, sz, ssl->rflags, &peer, &peerSz,
                              0, 0, 0, &err);
     if (ret < 0) {
         WOLFSSL_MSG("Embed Receive From error");
-
-        if (err == NET_ERR_RX || err == NET_SOCK_ERR_RX_Q_EMPTY ||
-            err == NET_ERR_FAULT_LOCK_ACQUIRE) {
-            if (wolfSSL_dtls_get_using_nonblock(ssl)) {
-                WOLFSSL_MSG("\tWould block");
-                return WOLFSSL_CBIO_ERR_WANT_READ;
-            }
-            else {
-                WOLFSSL_MSG("\tSocket timeout");
-                return WOLFSSL_CBIO_ERR_TIMEOUT;
-            }
-        } else {
-            WOLFSSL_MSG("\tGeneral error");
-            return WOLFSSL_CBIO_ERR_GENERAL;
-        }
+        return MicriumTranslateError(ssl, err);
     }
     else {
         if (dtlsCtx->peer.sz > 0) {
@@ -2756,7 +2708,6 @@ int MicriumReceiveFrom(WOLFSSL *ssl, char *buf, int sz, void *ctx)
             }
         }
     }
-
     return ret;
 }
 
@@ -2778,17 +2729,8 @@ int MicriumSendTo(WOLFSSL* ssl, char *buf, int sz, void *ctx)
                            &err);
     if (err < 0) {
         WOLFSSL_MSG("Embed Send To error");
-
-        if (err == NET_ERR_TX) {
-            WOLFSSL_MSG("\tWould block");
-            return WOLFSSL_CBIO_ERR_WANT_WRITE;
-
-        } else {
-            WOLFSSL_MSG("\tGeneral error");
-            return WOLFSSL_CBIO_ERR_GENERAL;
-        }
+        return MicriumTranslateError(ssl, err);
     }
-
     return ret;
 }
 
